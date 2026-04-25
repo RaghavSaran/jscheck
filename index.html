@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>YouTube Player</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0f0f0f;
+      color: #e1e1e1;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1.5rem 1rem;
+    }
+
+    h1 {
+      font-size: 1.4rem;
+      margin-bottom: 1rem;
+      text-align: center;
+    }
+
+    /* ── URL input area ── */
+    .input-row {
+      display: flex;
+      gap: .5rem;
+      width: 100%;
+      max-width: 640px;
+      margin-bottom: 1rem;
+    }
+
+    .input-row input {
+      flex: 1;
+      padding: .65rem .8rem;
+      border: 1px solid #333;
+      border-radius: 8px;
+      background: #1a1a1a;
+      color: #e1e1e1;
+      font-size: 1rem;
+      outline: none;
+    }
+
+    .input-row input:focus { border-color: #ff0050; }
+
+    .input-row button {
+      padding: .65rem 1.2rem;
+      border: none;
+      border-radius: 8px;
+      background: #ff0050;
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .input-row button:active { opacity: .8; }
+
+    /* ── Player wrapper (16:9) ── */
+    .player-wrap {
+      position: relative;
+      width: 100%;
+      max-width: 640px;
+      aspect-ratio: 16 / 9;
+      background: #000;
+      border-radius: 10px;
+      overflow: hidden;
+      display: none;               /* shown after submit */
+    }
+
+    .player-wrap iframe {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+    }
+
+    /* iOS fallback play overlay */
+    #playOverlay {
+      position: absolute;
+      inset: 0;
+      display: none;               /* shown only when needed */
+      justify-content: center;
+      align-items: center;
+      background: rgba(0,0,0,.55);
+      z-index: 2;
+      cursor: pointer;
+    }
+
+    #playOverlay span {
+      font-size: 3.5rem;
+      color: #fff;
+      background: rgba(255,0,80,.85);
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding-left: 6px;           /* optical centering of ▶ */
+    }
+
+    /* ── Transport controls ── */
+    .controls {
+      display: none;               /* shown after submit */
+      gap: 1.2rem;
+      margin-top: 1rem;
+      justify-content: center;
+    }
+
+    .controls button {
+      width: 60px;
+      height: 60px;
+      border: none;
+      border-radius: 50%;
+      background: #222;
+      color: #e1e1e1;
+      font-size: 1.5rem;
+      cursor: pointer;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      transition: background .15s;
+    }
+
+    .controls button:active { background: #ff0050; }
+
+    .status {
+      margin-top: .75rem;
+      font-size: .85rem;
+      color: #888;
+      text-align: center;
+      min-height: 1.2em;
+    }
+
+    /* ── Responsive tweaks ── */
+    @media (max-width: 480px) {
+      body { padding: 1rem .6rem; }
+      h1 { font-size: 1.15rem; }
+      .controls button { width: 52px; height: 52px; font-size: 1.3rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <h1>YouTube Player</h1>
+
+  <div class="input-row">
+    <input id="urlInput" type="url" placeholder="Paste YouTube URL here…"
+           enterkeyhint="go" autocomplete="off" />
+    <button id="submitBtn">Submit</button>
+  </div>
+
+  <div class="player-wrap" id="playerWrap">
+    <div id="ytPlayer"></div>
+    <div id="playOverlay"><span>▶</span></div>
+  </div>
+
+  <div class="controls" id="controls">
+    <button id="rwdBtn" aria-label="Rewind 10 seconds">⏪</button>
+    <button id="ppBtn"  aria-label="Pause / Play">⏸</button>
+    <button id="fwdBtn" aria-label="Forward 10 seconds">⏩</button>
+  </div>
+
+  <p class="status" id="status"></p>
+
+  <!-- YouTube IFrame API (loaded async) -->
+  <script src="https://www.youtube.com/iframe_api"></script>
+
+  <script>
+    /* ── State ── */
+    let player = null;
+    let apiReady = false;
+    let playStarted = false;
+    let fallbackTimer = null;
+
+    /* ── DOM refs ── */
+    const urlInput    = document.getElementById('urlInput');
+    const submitBtn   = document.getElementById('submitBtn');
+    const playerWrap  = document.getElementById('playerWrap');
+    const playOverlay = document.getElementById('playOverlay');
+    const controls    = document.getElementById('controls');
+    const rwdBtn      = document.getElementById('rwdBtn');
+    const ppBtn       = document.getElementById('ppBtn');
+    const fwdBtn      = document.getElementById('fwdBtn');
+    const status      = document.getElementById('status');
+
+    /* ── YouTube API ready callback (global) ── */
+    function onYouTubeIframeAPIReady() { apiReady = true; }
+
+    /* ── Extract video ID from various YouTube URL formats ── */
+    function extractVideoId(url) {
+      url = url.trim();
+      let match;
+      // youtu.be/ID
+      match = url.match(/youtu\.be\/([A-Za-z0-9_-]{11})/);
+      if (match) return match[1];
+      // youtube.com/watch?v=ID  or  youtube.com/embed/ID  or  youtube.com/shorts/ID
+      match = url.match(/youtube\.com\/(?:watch\?.*v=|embed\/|shorts\/)([A-Za-z0-9_-]{11})/);
+      if (match) return match[1];
+      // bare 11-char ID
+      if (/^[A-Za-z0-9_-]{11}$/.test(url)) return url;
+      return null;
+    }
+
+    /* ── Load / reload video ── */
+    function loadVideo(videoId) {
+      playStarted = false;
+      clearTimeout(fallbackTimer);
+      playOverlay.style.display = 'none';
+      playerWrap.style.display = 'block';
+      controls.style.display   = 'flex';
+      status.textContent = '';
+
+      if (player) {
+        player.loadVideoById(videoId);
+        return;
+      }
+
+      player = new YT.Player('ytPlayer', {
+        videoId: videoId,
+        playerVars: {
+          autoplay: 1,
+          playsinline: 1,       /* critical for iOS inline playback */
+          rel: 0,
+          modestbranding: 1
+        },
+        events: {
+          onReady: onPlayerReady,
+          onStateChange: onPlayerStateChange,
+          onError: onPlayerError
+        }
+      });
+    }
+
+    function onPlayerReady(e) {
+      e.target.playVideo();       /* works on iOS when triggered by user gesture chain */
+      startFallbackTimer();
+    }
+
+    function onPlayerStateChange(e) {
+      if (e.data === YT.PlayerState.PLAYING) {
+        playStarted = true;
+        clearTimeout(fallbackTimer);
+        playOverlay.style.display = 'none';
+        ppBtn.textContent = '⏸';
+      } else if (e.data === YT.PlayerState.PAUSED) {
+        ppBtn.textContent = '▶';
+      } else if (e.data === YT.PlayerState.ENDED) {
+        ppBtn.textContent = '▶';
+      }
+    }
+
+    function onPlayerError(e) {
+      status.textContent = 'Error loading video. Check the URL and try again.';
+    }
+
+    /* ── iOS fallback: show play overlay if video hasn't started in 2.5s ── */
+    function startFallbackTimer() {
+      clearTimeout(fallbackTimer);
+      fallbackTimer = setTimeout(() => {
+        if (!playStarted) {
+          playOverlay.style.display = 'flex';
+        }
+      }, 2500);
+    }
+
+    playOverlay.addEventListener('click', () => {
+      if (player) player.playVideo();
+      playOverlay.style.display = 'none';
+    });
+
+    /* ── Submit handler ── */
+    function handleSubmit() {
+      const videoId = extractVideoId(urlInput.value);
+      if (!videoId) {
+        status.textContent = 'Invalid YouTube URL. Try again.';
+        return;
+      }
+      if (!apiReady) {
+        status.textContent = 'YouTube API still loading… try again in a moment.';
+        return;
+      }
+      loadVideo(videoId);
+    }
+
+    submitBtn.addEventListener('click', handleSubmit);
+    urlInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') handleSubmit();
+    });
+
+    /* ── Transport controls ── */
+    rwdBtn.addEventListener('click', () => {
+      if (!player) return;
+      player.seekTo(Math.max(player.getCurrentTime() - 10, 0), true);
+    });
+
+    fwdBtn.addEventListener('click', () => {
+      if (!player) return;
+      player.seekTo(player.getCurrentTime() + 10, true);
+    });
+
+    ppBtn.addEventListener('click', () => {
+      if (!player) return;
+      const state = player.getPlayerState();
+      if (state === YT.PlayerState.PLAYING) {
+        player.pauseVideo();
+      } else {
+        player.playVideo();
+      }
+    });
+  </script>
+</body>
+</html>
